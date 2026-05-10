@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.idea/
+.vscode/
+
+# Data and models — host externally (Drive)
+slt_data/
+models/
+*.ckpt
+*.pickle.gzip
+
+# Logs
+*.log
+training.log
