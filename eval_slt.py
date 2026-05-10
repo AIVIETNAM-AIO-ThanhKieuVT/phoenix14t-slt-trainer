@@ -261,7 +261,8 @@ def main():
     ckpt_path = model_dir / args.ckpt
     print(f"[ckpt] loading {ckpt_path}")
     state = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(state["model"])
+    sd = state.get("model_state", state.get("model", state))
+    model.load_state_dict(sd, strict=True)
     model.eval()
     print(f"[ckpt] saved at epoch={state.get('epoch', '?')} "
           f"with bleu={state.get('best_bleu', '?')}")
