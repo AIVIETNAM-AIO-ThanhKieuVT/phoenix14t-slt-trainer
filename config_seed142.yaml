@@ -1,9 +1,11 @@
 # =============================================================================
 # Config: independent SLT evaluator on PHOENIX-2014T
-#   random_seed=142, encoder/decoder=4 layers, hidden=384, ff=768
+#   random_seed=142 (vs 42 for the original SLT)
+#   architecture matches the original Camgoz SLT (3 layers, hidden=256, ff=512)
+#   so the only source of independence is the random seed.
 # Run with: python train_slt.py --config config_seed142.yaml ...
 # =============================================================================
-name: slt_seed142_4layer_h384
+name: slt_seed142_3layer_h256
 wandb: false
 
 data:
@@ -36,8 +38,8 @@ training:
     reset_best_ckpt: false
     reset_scheduler: false
     reset_optimizer: false
-    random_seed: 142             # CHANGED: 42 -> 142 for independence
-    model_dir: ../models/slt_v2_seed142_4layer_h384
+    random_seed: 142
+    model_dir: ../models/slt_seed142_3layer_h256
     recognition_loss_weight: 1.0
     translation_loss_weight: 1.0
     eval_metric: bleu
@@ -80,24 +82,24 @@ model:
         embeddings:
             activation_type: softsign
             dropout: 0.1
-            embedding_dim: 384       # CHANGED: 256 -> 384
+            embedding_dim: 256
             norm_type: batch
             scale: false
-        ff_size: 768                  # CHANGED: 512 -> 768  (= 2 * hidden)
-        hidden_size: 384              # CHANGED: 256 -> 384
+        ff_size: 512
+        hidden_size: 256
         num_heads: 8
-        num_layers: 4                 # CHANGED: 3 -> 4
+        num_layers: 3
         type: transformer
     decoder:
         dropout: 0.1
         embeddings:
             activation_type: softsign
             dropout: 0.1
-            embedding_dim: 384        # CHANGED: 256 -> 384
+            embedding_dim: 256
             norm_type: batch
             scale: false
-        ff_size: 768                  # CHANGED: 512 -> 768
-        hidden_size: 384              # CHANGED: 256 -> 384
+        ff_size: 512
+        hidden_size: 256
         num_heads: 8
-        num_layers: 4                 # CHANGED: 3 -> 4
+        num_layers: 3
         type: transformer
