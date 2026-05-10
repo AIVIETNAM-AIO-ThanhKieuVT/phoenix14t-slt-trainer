@@ -44,7 +44,7 @@ training:
     translation_loss_weight: 1.0
     eval_metric: bleu
     optimizer: adam
-    learning_rate: 0.001
+    learning_rate: 2.0
     batch_size: 32
     num_valid_log: 5
     epochs: 3000
@@ -57,18 +57,19 @@ training:
     overwrite: false
     shuffle: true
     use_cuda: true
-    translation_max_output_length: 30
+    translation_max_output_length: 50
     keep_last_ckpts: 1
     batch_multiplier: 8
     logging_freq: 100
     validation_freq: 14
     betas: [0.9, 0.998]
-    scheduling: plateau
+    scheduling: noam
+    warmup_steps: 4000
     learning_rate_min: 1.0e-08
     weight_decay: 0.001
     patience: 5
     decrease_factor: 0.8
-    label_smoothing: 0.0
+    label_smoothing: 0.1
 
 model:
     initializer: xavier

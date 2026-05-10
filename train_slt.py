@@ -224,6 +224,45 @@ class XentLoss(nn.Module):
         )
 
 
+class LabelSmoothingLoss(nn.Module):
+    """Label smoothing on log_probs, ignoring pad."""
+
+    def __init__(self, pad_idx: int, smoothing: float):
+        super().__init__()
+        self.pad_idx = pad_idx
+        self.smoothing = smoothing
+
+    def forward(self, log_probs, target):
+        if self.smoothing <= 0.0:
+            B, T, V = log_probs.shape
+            return F.nll_loss(
+                log_probs.reshape(-1, V),
+                target.reshape(-1),
+                ignore_index=self.pad_idx,
+                reduction="sum",
+            )
+
+        B, T, V = log_probs.shape
+        log_probs = log_probs.reshape(-1, V)
+        target = target.reshape(-1)
+
+        # NLL for true labels
+        nll = F.nll_loss(
+            log_probs,
+            target,
+            ignore_index=self.pad_idx,
+            reduction="sum",
+        )
+
+        # Uniform smoothing over non-pad tokens
+        smooth = -log_probs.mean(dim=-1)
+        non_pad = target.ne(self.pad_idx)
+        smooth = smooth[non_pad].sum()
+
+        eps = self.smoothing
+        return (1.0 - eps) * nll + eps * smooth
+
+
 class CtcLoss(nn.Module):
     def __init__(self, blank: int = 0):
         super().__init__()
@@ -294,16 +333,32 @@ def compute_bleu4(hyps: List[str], refs: List[str]) -> float:
         return float("nan")
 
 
-def validate(model, dev_loader, txt_vocab, device, max_len: int):
+def validate(model, dev_loader, txt_vocab, device, max_len: int,
+             beam_size: int = 1, beam_alpha: float = -1):
     model.eval()
     hyps, refs = [], []
     for batch in dev_loader:
         batch = to_device(batch, device)
-        out_ids = greedy_decode(model, batch, txt_vocab, max_len=max_len)
-        for i in range(out_ids.shape[0]):
-            hyp_words = ids_to_words(out_ids[i], txt_vocab)
-            hyps.append(" ".join(hyp_words))
-            refs.append(batch.ref_texts[i])
+        if beam_size <= 1:
+            out_ids = greedy_decode(model, batch, txt_vocab, max_len=max_len)
+            for i in range(out_ids.shape[0]):
+                hyp_words = ids_to_words(out_ids[i], txt_vocab)
+                hyps.append(" ".join(hyp_words))
+                refs.append(batch.ref_texts[i])
+        else:
+            _, stacked_txt_output, _ = model.run_batch(
+                batch,
+                translation_beam_size=beam_size,
+                translation_beam_alpha=beam_alpha,
+                translation_max_output_length=max_len,
+            )
+            for i in range(stacked_txt_output.shape[0]):
+                hyp_words = ids_to_words(
+                    torch.tensor(stacked_txt_output[i], device=device),
+                    txt_vocab,
+                )
+                hyps.append(" ".join(hyp_words))
+                refs.append(batch.ref_texts[i])
     return compute_bleu4(hyps, refs), hyps[:3], refs[:3]
 
 
@@ -440,7 +495,8 @@ def main():
           f"do_recognition={do_recognition}, do_translation={do_translation}")
 
     # Loss + optimizer
-    xent = XentLoss(txt_pad).to(device)
+    smoothing = float(cfg["training"].get("label_smoothing", 0.0))
+    xent = LabelSmoothingLoss(txt_pad, smoothing).to(device)
     ctc = CtcLoss(blank=gls_vocab.stoi[SIL]).to(device)
     rec_w = cfg["training"].get("recognition_loss_weight", 1.0)
     trans_w = cfg["training"].get("translation_loss_weight", 1.0)
@@ -449,12 +505,26 @@ def main():
     wd = float(cfg["training"].get("weight_decay", 1e-3))
     betas = cfg["training"].get("betas", [0.9, 0.998])
     optimizer = optim.Adam(model.parameters(), lr=lr, betas=tuple(betas), weight_decay=wd)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max",
-        factor=cfg["training"].get("decrease_factor", 0.8),
-        patience=cfg["training"].get("patience", 5),
-        min_lr=float(cfg["training"].get("learning_rate_min", 1e-8)),
-    )
+
+    scheduling = cfg["training"].get("scheduling", "plateau").lower()
+    if scheduling == "noam":
+        warmup = int(cfg["training"].get("warmup_steps", 4000))
+        d_model = cfg["model"]["encoder"]["hidden_size"]
+        factor = float(cfg["training"].get("learning_rate", 1.0))
+        optimizer.param_groups[0]["lr"] = 1.0
+
+        def _noam(step):
+            step = max(step, 1)
+            return factor * (d_model ** -0.5) * min(step ** -0.5, step * warmup ** -1.5)
+
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, _noam)
+    else:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max",
+            factor=cfg["training"].get("decrease_factor", 0.8),
+            patience=cfg["training"].get("patience", 5),
+            min_lr=float(cfg["training"].get("learning_rate_min", 1e-8)),
+        )
 
     # Resume
     latest_path = model_dir / "latest.ckpt"
@@ -471,9 +541,18 @@ def main():
 
     # Training
     n_epochs = cfg["training"].get("epochs", 100)
-    val_freq = cfg["training"].get("validation_freq_epochs", 1)
+    val_freq = cfg["training"].get(
+        "validation_freq_epochs",
+        cfg["training"].get("validation_freq", 1),
+    )
     log_every = cfg["training"].get("logging_freq", 100)
     max_decode_len = cfg["training"].get("translation_max_output_length", 30)
+    eval_beam = int(cfg["training"].get("eval_translation_beam_size", 1))
+    eval_alpha = float(cfg["training"].get("eval_translation_beam_alpha", -1))
+    grad_accum = int(cfg["training"].get("batch_multiplier", 1))
+    if grad_accum < 1:
+        grad_accum = 1
+    global_step = 0
 
     for epoch in range(start_epoch, n_epochs):
         model.train()
@@ -483,7 +562,8 @@ def main():
 
         for step, batch in enumerate(train_loader):
             batch = to_device(batch, device)
-            optimizer.zero_grad()
+            if step % grad_accum == 0:
+                optimizer.zero_grad()
 
             decoder_outputs, gloss_log_probs = model(
                 sgn=batch.sgn, sgn_mask=batch.sgn_mask, sgn_lengths=batch.sgn_lengths,
@@ -509,9 +589,15 @@ def main():
                 ) * rec_w
                 loss = loss + ctc_loss / batch.sgn.shape[0]
 
+            loss = loss / grad_accum
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+
+            if (step + 1) % grad_accum == 0 or (step + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                optimizer.step()
+                global_step += 1
+                if scheduling == "noam":
+                    scheduler.step()
 
             running_loss += loss.item()
             running_n += 1
@@ -524,9 +610,11 @@ def main():
         if (epoch + 1) % val_freq == 0:
             t_val = time.time()
             bleu, sample_hyps, sample_refs = validate(
-                model, dev_loader, txt_vocab, device, max_decode_len
+                model, dev_loader, txt_vocab, device, max_decode_len,
+                beam_size=eval_beam, beam_alpha=eval_alpha,
             )
-            scheduler.step(bleu)
+            if scheduling != "noam":
+                scheduler.step(bleu)
             line = (f"epoch={epoch}  bleu4={bleu:.2f}  best={max(bleu, best_bleu):.2f}  "
                     f"lr={optimizer.param_groups[0]['lr']:.2e}  "
                     f"epoch_time={time.time()-t_epoch:.1f}s  val_time={time.time()-t_val:.1f}s")
