@@ -9,8 +9,11 @@ evaluator for sign-language production research.
 
 ```
 .
-├── train_slt.py            # main trainer (single file)
-├── config_seed142.yaml     # 4-layer / hidden=384 / seed=142 config
+├── train_slt.py            # SLT trainer
+├── eval_slt.py             # beam-search decode + BLEU/WER on dev/test
+├── cross_eval.py           # SLRTP-style pose-prediction evaluation
+├── metrics.py, helpers.py, skeleton_def.py, external_metrics/
+├── config_seed142.yaml     # seed=142 training config
 ├── back_translation/       # transformer encoder / decoder modules
 └── colab_train.ipynb       # ready-to-run Colab notebook
 ```
@@ -56,3 +59,21 @@ command resumes automatically (no flags needed).
 
 `<model_dir>/best.ckpt` is the best dev-BLEU checkpoint. It can be loaded with
 `back_translation.bt_model.build_model(...)` for downstream evaluation.
+
+## Cross-evaluator (SLRTP protocol)
+
+To run a SignFML / baseline / ground-truth comparison under a trained SLT
+checkpoint, use `cross_eval.py`. It accepts a `.pt` / `.pkl` / `.json` file of
+predicted pose dicts and a GT `.pt`, runs back-translation, then computes BLEU,
+chrF, ROUGE, WER, DTW-MJE, Total Distance, and avg duration.
+
+```bash
+python cross_eval.py \
+    /path/to/predictions.pt \
+    /path/to/test.pt \
+    /path/to/slt_model_dir \
+    --tag signfml_under_slt_ind \
+    --fps 25
+```
+
+Results are saved to `./results/<tag>.json` and `./results/<tag>_text_preds.pt`.

@@ -3,3 +3,5 @@ numpy
 pyyaml
 sacrebleu
 tqdm
+jiwer
+fastdtw
