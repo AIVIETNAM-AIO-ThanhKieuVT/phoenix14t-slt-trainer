@@ -200,7 +200,9 @@ def collate(samples, txt_pad: int, gls_pad: int):
 def to_device(batch, device):
     for k, v in batch.__dict__.items():
         if isinstance(v, torch.Tensor):
-            setattr(batch, k, v.to(device))
+            # pack_padded_sequence/CTCLoss require length tensors on CPU
+            # regardless of the compute device (true for CUDA and MPS alike).
+            setattr(batch, k, v if k.endswith("_lengths") else v.to(device))
     return batch
 
 
